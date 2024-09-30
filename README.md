@@ -1,13 +1,13 @@
 # BT-Scan-Tool
 
 ## Overview
-BT Scan Web is a web application for scanning Bluetooth devices. It provides functionalities such as real-time Bluetooth scanning, GPT-based data analysis, Telegram notifications, and a live dashboard to display discovered devices.
+This Python-based tool runs on a Raspberry Pi and continuously scans for nearby Bluetooth devices. It can also capture GPS coordinates using a u-blox NEO-6M GPS module (WIP) and logs the detected devices. Additionally, the tool can send the logged data to a Telegram chat.
 
 ## Features
-- **Live Bluetooth Scan**: Displays all discovered Bluetooth devices in real-time.
-- **Statistics**: Visualizes Bluetooth activity over time through charts.
-- **GPT Integration**: Analyzes scanned data using the OpenAI GPT API.
-- **Telegram Notifications**: Sends updates regarding new devices or scan results.
+- Bluetooth Classic and BLE scanning
+- GPS integration with MGRS format logging
+- CLI for easy control and interaction
+- Periodic and manual Telegram reporting
 
 ## Installation
 1. **Clone the Repository**:
@@ -33,13 +33,15 @@ BT Scan Web is a web application for scanning Bluetooth devices. It provides fun
     ```
 
 ## Usage
-1. **Start the Web Server**:
-    ```bash
-    python3 main.py
-    ```
-
-2. **Access through the Browser**:
+1. **Telegram API-Token and ChatID**:
+   Edit `config.json` and fill in your Telegram API and ChatID.
+2. **Start bt-scan-tool**:
+   run `python3 main.py`
+3. **Choose your BT-Device**:
+   One or more MAC-Adresses will be displayed. Choose your prefered BT-Device.
+4. **Access through the Browser**:
    Open `http://localhost:5000` or `http://<your-ip>:5000`.
+    
 
 ## Project Structure
 ```bash
@@ -75,3 +77,6 @@ Telegram only allows messages with 4096 characters, an error occurs if your blue
 
 ## License
 This project is licensed under the MIT License - see the LICENSE file for details.
+
+## Contact
+For questions or issues, please open an issue on GitHub or contact me via DM.

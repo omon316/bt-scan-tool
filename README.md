@@ -1,4 +1,4 @@
-# BT Scan Web
+# BT-Scan-Tool
 
 ## Overview
 BT Scan Web is a web application for scanning Bluetooth devices. It provides functionalities such as real-time Bluetooth scanning, GPT-based data analysis, Telegram notifications, and a live dashboard to display discovered devices.

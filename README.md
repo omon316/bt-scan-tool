@@ -45,7 +45,7 @@ This Python-based tool runs on a Raspberry Pi and continuously scans for nearby 
 
 ## Project Structure
 ```bash
-bt-scan-web/
+bt-scan-tool/
 ├── app.py                      # Main Flask application file
 ├── bluetooth_scan.py           # Bluetooth scanning functions
 ├── gpt_integration.py          # GPT API integration for log analysis

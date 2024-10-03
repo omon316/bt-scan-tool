@@ -1,4 +1,16 @@
-# BT-Scan-Tool
+     _________  ________  ________  ___              
+|\   __  \|\___   ___\            |\   ____\|\   ____\|\   __  \|\   ___  \              |\___   ___\\   __  \|\   __  \|\  \             
+\ \  \|\ /\|___ \  \_|____________\ \  \___|\ \  \___|\ \  \|\  \ \  \\ \  \  ___________\|___ \  \_\ \  \|\  \ \  \|\  \ \  \            
+ \ \   __  \   \ \  \|\____________\ \_____  \ \  \    \ \   __  \ \  \\ \  \|\____________\  \ \  \ \ \  \\\  \ \  \\\  \ \  \           
+  \ \  \|\  \   \ \  \|____________|\|____|\  \ \  \____\ \  \ \  \ \  \\ \  \|____________|   \ \  \ \ \  \\\  \ \  \\\  \ \  \____      
+   \ \_______\   \ \__\               ____\_\  \ \_______\ \__\ \__\ \__\\ \__\                 \ \__\ \ \_______\ \_______\ \_______\    
+    \|_______|    \|__|              |\_________\|_______|\|__|\|__|\|__| \|__|                  \|__|  \|_______|\|_______|\|_______|    
+                                     \|_________|                                                                                         
+                                                                                                                                          
+                                                                                                                                          
+
+
+BT-Scan-Tool
 
 ## Overview
 This Python-based tool runs on a Raspberry Pi and continuously scans for nearby Bluetooth devices. It can also capture GPS coordinates using a u-blox NEO-6M GPS module (WIP) and logs the detected devices. Additionally, the tool can send the logged data to a Telegram chat.

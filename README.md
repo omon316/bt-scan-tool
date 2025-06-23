@@ -24,7 +24,7 @@ This Python-based tool runs on a Raspberry Pi and continuously scans for nearby 
 ## Installation
 1. **Clone the Repository**:
     ```bash
-    git clone https://github.com/<your-username>/bt-scan-web.git
+    git clone https://github.com/omon316/bt-scan-web.git
     cd bt-scan-web
     ```
 

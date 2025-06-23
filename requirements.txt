@@ -1,0 +1,5 @@
+Flask
+pybluez
+pyserial
+pynmea2
+requests

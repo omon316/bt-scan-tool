@@ -1,0 +1,6 @@
+{
+  "telegram": {
+    "api_token": "YOUR_API_TOKEN",
+    "chat_id": "YOUR_CHAT_ID"
+  }
+}

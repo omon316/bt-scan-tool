@@ -1,4 +1,4 @@
-````markdown
+
 # 🛰️ BT-SCAN-TOOL DASHBOARD
 
 Ein interaktives **Web-Dashboard** für das [BT-Scan-Tool](https://github.com/omon316/bt-scan-tool).  
@@ -43,7 +43,7 @@ streamlit run bt_scan_dashboard_full.py
 
 Danach öffnet sich die Weboberfläche im Browser unter:
 
-👉 [http://localhost:8501](http://localhost:8501)
+👉 [http://localhost:8501]
 
 ---
 
@@ -114,3 +114,4 @@ MIT License
 
 Möchtest du, dass ich diese `README.md` direkt in dein GitHub-Repo `omon316/bt-scan-tool` einfüge (per Commit in den `main`-Branch)?
 ```
+

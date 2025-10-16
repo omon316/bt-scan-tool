@@ -1,0 +1,5 @@
+pip install streamlit bleak pybluez requests folium streamlit-folium
+
+pip install streamlit-autorefresh
+
+pip install streamlit-autorefresh

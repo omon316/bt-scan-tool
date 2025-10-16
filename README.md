@@ -1,39 +1,116 @@
-# Bluetooth Scanning Tool with GPS Integration
+````markdown
+# 🛰️ BT-SCAN-TOOL DASHBOARD
 
-![Sample Output](docs/images/sample_output.png)
+Ein interaktives **Web-Dashboard** für das [BT-Scan-Tool](https://github.com/omon316/bt-scan-tool).  
+Es kombiniert alle Funktionen des CLI in einer modernen Oberfläche, mit direkter Steuerung von Bluetooth-Scans, Telegram-Anbindung und Log-Analyse.
 
-## Overview
-This Python-based tool runs on a Raspberry Pi and continuously scans for nearby Bluetooth devices. It can also capture GPS coordinates using a u-blox NEO-6M GPS module and logs the detected devices with their location in MGRS format. Additionally, the tool can send the logged data to a Telegram chat.
+---
 
-## Features
-- Bluetooth Classic and BLE scanning
-- GPS integration with MGRS format logging
-- CLI for easy control and interaction
-- Periodic and manual Telegram reporting
+## 🚀 Installation
 
-!!!! be advised, GPS logging is implemented but not tested. !!!!
+### 1. Voraussetzungen
 
-## Getting Started
+- Python 3.10 oder neuer  
+- Bluetooth-Adapter (z. B. Raspberry Pi integriert oder USB-Dongle)  
+- Optional: GPS-Modul (z. B. u-blox)
 
-### Hardware Setup
-Connect the u-blox NEO-6M GPS module to the Raspberry Pi as shown below:
+### 2. Repository klonen
 
-![Hardware Setup](docs/images/hardware_setup.png)
+```bash
+git clone https://github.com/omon316/bt-scan-tool.git
+cd bt-scan-tool
+````
 
-### Installation
-Follow the [installation guide](docs/installation.md) to set up the necessary software and dependencies on your Raspberry Pi.
+### 3. Abhängigkeiten installieren
 
-### Usage
-Learn how to use the tool with various commands in the [usage guide](docs/usage.md).
+```bash
+pip install -r requirements.txt
+```
 
-### Troubleshooting
-Having issues? Check out the [troubleshooting guide](docs/troubleshooting.md) for common problems and solutions.
+Oder manuell:
 
-## License
-This project is licensed under the MIT License.
+```bash
+pip install streamlit bleak pybluez requests folium streamlit-folium
+```
 
-## Contact
-For questions or issues, please  contact me :)
+---
 
-## Known issues
-currently the telegram API only allows 50 MAC-Adresses, and currently there is no function to renew the logs.log file.
+## 🧭 Start des Dashboards
+
+```bash
+streamlit run bt_scan_dashboard_full.py
+```
+
+Danach öffnet sich die Weboberfläche im Browser unter:
+
+👉 [http://localhost:8501](http://localhost:8501)
+
+---
+
+## 🧩 Dashboard-Funktionen
+
+| Bereich              | Beschreibung                                                                                    |
+| -------------------- | ----------------------------------------------------------------------------------------------- |
+| **Scanner**          | Startet einen einmaligen Bluetooth-Scan (Classic + BLE) und zeigt die gefundenen Geräte live an |
+| **Dauerhafter Scan** | Aktiviert einen Hintergrund-Task, der regelmäßig scannt (Standard: alle 15 Minuten)             |
+| **Scan stoppen**     | Beendet laufende Scans                                                                          |
+| **Logs anzeigen**    | Zeigt die Datei `logs/bluetooth_scan.log`                                                       |
+| **Statistik**        | Visualisiert die häufigsten Geräte und Scan-Zeitpunkte                                          |
+| **Karte**            | Zeigt Gerätepositionen (wenn GPS aktiviert ist)                                                 |
+| **Telegram senden**  | Sendet aktuelle Ergebnisse oder die Logdatei an den Telegram-Bot                                |
+| **Einstellungen**    | Speichert `telegram_api_token`, `telegram_chat_id`, Intervall und GPS-Optionen in `config.json` |
+
+---
+
+## ⚙️ Konfiguration
+
+Die Datei `config.json` enthält alle wichtigen Einstellungen:
+
+```json
+{
+    "telegram_api_token": "DEIN_API_TOKEN",
+    "telegram_chat_id": "123456789",
+    "scan_interval": 900,
+    "enable_gps": false
+}
+```
+
+Das Dashboard erstellt und aktualisiert diese Datei automatisch.
+
+---
+
+## 🧠 Tipps
+
+* Wenn kein Token vorhanden ist, erscheint eine Warnung im Dashboard.
+* Über den Button **„Telegram-Testnachricht“** kannst du prüfen, ob die Verbindung funktioniert.
+* Logs findest du unter `logs/bluetooth_scan.log`.
+
+---
+
+## 🛠️ Systemstart (optional)
+
+Damit das Dashboard beim Boot automatisch startet:
+
+```bash
+crontab -e
+```
+
+und füge am Ende hinzu:
+
+```
+@reboot cd /home/pi/bt-scan-tool && streamlit run bt_scan_dashboard_full.py
+```
+
+---
+
+## 🧾 Lizenz
+
+MIT License
+© 2025 omon316
+
+```
+
+---
+
+Möchtest du, dass ich diese `README.md` direkt in dein GitHub-Repo `omon316/bt-scan-tool` einfüge (per Commit in den `main`-Branch)?
+```

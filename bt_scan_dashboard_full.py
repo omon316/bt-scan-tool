@@ -1,498 +1,118 @@
-"""
-BT‑Scan‑Tool Dashboard (vollständige Version, integriert)
-=========================================================
-
-Änderungen gegenüber der vorherigen Fassung:
-- ✅ LED‑Statusanzeige (grün/rot) konsistent über `st.session_state["scan_running"]`.
-- ✅ Hintergrund‑Scan ohne Streamlit‑Aufrufe im Thread (keine ScriptRunContext‑Warnungen).
-- ✅ Einmal‑Scan nutzt `scan_and_store()` ⇒ Logs werden sicher geschrieben.
-- ✅ Absolute Log‑Pfade relativ zum Skriptverzeichnis.
-- ✅ `use_container_width` → `width='stretch'` (kompatibel >= Okt 2025).
-- ✅ Heartbeat + Iterationszähler zur Laufzeitkontrolle.
-- ✅ Telegram‑Versand aus dem Thread direkt über `telegram_report`, ohne UI‑Calls.
-
-Start:
-    streamlit run bt_scan_dashboard_full.py
-"""
-
-from __future__ import annotations
-
-import json
-import os
+import streamlit as st
+import pandas as pd
 import threading
 import time
-from datetime import datetime
-from pathlib import Path
-from typing import List, Tuple
+import os
+from bluetooth_scan import scan_and_store
+from database import get_recent_logs, init_db
+import telegram_report
 
-import pandas as pd  # type: ignore
-import streamlit as st  # type: ignore
-from folium import Map, Marker  # type: ignore
-from streamlit_folium import st_folium  # type: ignore
+# Setup
+st.set_page_config(page_title="BT-Scan Ultimate", layout="wide", page_icon="📡")
+init_db()
 
-# -----------------------------------------------------------------------------
-# Modul‑Importe (robust gegen fehlende HW/Bibliotheken)
-# -----------------------------------------------------------------------------
-try:
-    import bluetooth_scan  # type: ignore
-except Exception as scan_import_error:  # noqa: BLE001
-    bluetooth_scan = None
-    scan_import_error_message = str(scan_import_error)
-else:
-    scan_import_error_message = ""
-
-try:
-    import telegram_report  # type: ignore
-except Exception as telegram_import_error:  # noqa: BLE001
-    telegram_report = None
-    telegram_import_error_message = str(telegram_import_error)
-else:
-    telegram_import_error_message = ""
-
-# -----------------------------------------------------------------------------
-# Pfade (absolut relativ zum Skript)
-# -----------------------------------------------------------------------------
-BASE_DIR = Path(__file__).resolve().parent
-LOG_DIR = BASE_DIR / "logs"
-LOG_DIR.mkdir(exist_ok=True)
-LOG_PATH = LOG_DIR / "bluetooth_scan.log"
-CONFIG_PATH = BASE_DIR / "config.json"
-
-# -----------------------------------------------------------------------------
-# Hilfsfunktionen
-# -----------------------------------------------------------------------------
-
-def load_config() -> dict:
-    """Konfiguration (Telegram) laden oder Defaults liefern."""
-    if CONFIG_PATH.exists():
-        with CONFIG_PATH.open("r", encoding="utf-8") as f:
-            return json.load(f)
-    return {"api_token": "", "chat_id": "", "scan_interval": 900, "enable_gps": False}
-
-
-def save_config(config: dict) -> None:
-    """Konfiguration nach `config.json` speichern."""
-    with CONFIG_PATH.open("w", encoding="utf-8") as f:
-        json.dump(config, f, indent=2)
-
-
-def list_bluetooth_receivers() -> List[str]:
-    """Verfügbare Bluetooth‑Adapter mit `hcitool dev` ermitteln (MAC‑Adressen)."""
-    import subprocess
-    try:
-        result = subprocess.run(["hcitool", "dev"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        lines = result.stdout.splitlines()[1:]  # Kopfzeile überspringen
-        receivers: List[str] = []
-        for line in lines:
-            parts = line.split()
-            if len(parts) >= 2:
-                receivers.append(parts[1])
-        return receivers
-    except Exception:  # noqa: BLE001
-        return []
-
-
-def read_logs() -> List[str]:
-    """Logdatei zeilenweise lesen."""
-    if LOG_PATH.exists():
-        with LOG_PATH.open("r", encoding="utf-8") as f:
-            return f.read().splitlines()
-    return []
-
-
-def parse_device_string(device_string: str) -> Tuple[int, str, str, str, str]:
-    """Gerätezeile parsen: "<index> <day> <time> <MONTH> <MAC> <Name>"."""
-    parts = device_string.strip().split(maxsplit=5)
-    if len(parts) < 6:
-        parts = (parts + [""])[:6]
-    index = parts[0]
-    day = parts[1]
-    clock = parts[2]
-    month = parts[3]
-    mac = parts[4]
-    name = parts[5] if len(parts) > 5 else ""
-    now = datetime.now()
-    date_str = f"{day}-{month}-{now.year} {clock[:2]}:{clock[2:]}"
-    return int(index), date_str, mac, name, device_string
-
-
-def devices_to_dataframe(devices: List[str]) -> pd.DataFrame:
-    """Liste formatierter Gerätezeilen → DataFrame."""
-    records = []
-    for device in devices:
-        try:
-            idx, date_str, mac, name, _raw = parse_device_string(device)
-            records.append((idx, date_str, mac, name))
-        except Exception:  # noqa: BLE001
-            continue
-    df = pd.DataFrame(records, columns=["Index", "Zeit", "MAC", "Name"])
-    return df
-
-
-def sample_devices() -> List[str]:
-    """Fallback‑Daten, falls Scan fehlschlägt."""
-    return [
-        "001 14 1230 OCT AA:BB:CC:DD:EE:FF BT-Headset",
-        "002 14 1231 OCT 11:22:33:44:55:66 Smartwatch",
-    ]
-
-
-def perform_scan_backend(force_log: bool = False) -> List[str]:
-    """Bluetooth-Scan ausführen und formatierte Gerätezeilen zurückgeben.
-
-    - Wenn ``force_log`` True ist, wird die TTL-Logik des Repos umgangen und
-      *jeder* gefundene Eintrag geloggt (Classic + BLE), indem wir die
-      Einträge selbst formatieren und via ``bluetooth_scan.log_device``
-      schreiben.
-    - Wenn ``force_log`` False ist, nutzen wir die Standardfunktion
-      ``bluetooth_scan.scan_and_store()`` des Repos (loggt nur neue/ältere
-      Einträge > 900 s).
-
-    **Wichtig:** Keine Streamlit-UI-Calls in dieser Funktion (thread-sicher).
-    Fehler werden in ``st.session_state['last_scan_error']`` abgelegt.
-    """
-    try:
-        if not bluetooth_scan:
-            raise RuntimeError("bluetooth_scan-Modul nicht verfügbar")
-
-        if not force_log:
-            # Standardweg: benutzt die eingebaute TTL (900 s)
-            return bluetooth_scan.scan_and_store()
-
-        # Force-Logging: Classic + BLE scan und *alles* loggen
-        entries: List[str] = []
-        try:
-            classic = bluetooth_scan.scan_bluetooth_devices()
-        except Exception:
-            classic = []
-
-        try:
-            # BLE-Scan (async)
-            ble_devices = []
-            import asyncio
-            ble_devices = asyncio.run(bluetooth_scan.scan_ble_devices())
-        except Exception:
-            ble_devices = []
-
-        devices = list(classic) + list(ble_devices)
-        for addr, name in devices:
-            try:
-                idx = bluetooth_scan.get_device_index(addr)
-                info = bluetooth_scan.format_device_info(idx, addr, name or "Unknown")
-                bluetooth_scan.log_device(info)
-                entries.append(info)
-            except Exception:
-                continue
-        return entries
-    except Exception as exc:
-        # Keine UI-Ausgabe hier; nur Status merken
-        st.session_state["last_scan_error"] = str(exc)
-        # Fallback: Musterwerte zurückgeben, damit Aufrufer etwas anzeigen kann
-        return sample_devices()
-
-
-def send_report_to_telegram_ui(devices: List[str]) -> None:
-    """Geräteliste via Telegram senden (mit UI‑Feedback). NICHT im Thread nutzen!"""
-    if telegram_report:
-        try:
-            telegram_report.send_report(devices)
-            st.success("Geräteliste wurde via Telegram gesendet.")
-        except Exception as exc:  # noqa: BLE001
-            st.error(f"Fehler beim Senden via Telegram: {exc}")
-    else:
-        st.warning("Telegram‑Modul nicht verfügbar. Bitte konfigurieren.")
-
-
-def send_log_to_telegram_ui(lines: List[str]) -> None:
-    """Loginhalt via Telegram senden (mit UI‑Feedback). NICHT im Thread nutzen!"""
-    if telegram_report:
-        try:
-            message = "Bluetooth Scan Log:\n" + "\n".join(lines)
-            telegram_report.send_telegram_message(message)
-            st.success("Log wurde via Telegram gesendet.")
-        except Exception as exc:  # noqa: BLE001
-            st.error(f"Fehler beim Senden des Logs: {exc}")
-    else:
-        st.warning("Telegram‑Modul nicht verfügbar. Bitte konfigurieren.")
-
-
-# -----------------------------------------------------------------------------
-# Hintergrund‑Thread (ohne Streamlit‑Calls)
-# -----------------------------------------------------------------------------
-
-def background_scan_loop(interval_seconds: int = 900, stop_event: threading.Event | None = None) -> None:
-    """Periodischer Scan + optionaler Telegram‑Report (ohne Streamlit‑Calls).
-
-    Nutzt ein `stop_event`, damit der Thread zuverlässig beendet werden kann,
-    ohne auf `st.session_state` angewiesen zu sein.
-    """
-    if stop_event is None:
-        stop_event = threading.Event()
-    while not stop_event.is_set():
-        try:
-            force_log = st.session_state.get("force_log_every_scan", False)
-            devices = perform_scan_backend(force_log=force_log)  # schreibt ins Log (ggf. erzwungen)
-            # Optional direkt per Telegram berichten (ohne UI‑Calls)
-            if telegram_report:
-                try:
-                    telegram_report.send_report(devices)
-                except Exception:
-                    st.session_state["bg_last_error"] = "Telegram‑Versand fehlgeschlagen"
-            # Heartbeat/Counter aktualisieren
-            st.session_state["bg_iterations"] = st.session_state.get("bg_iterations", 0) + 1
-            st.session_state["bg_last_heartbeat"] = time.strftime("%Y-%m-%d %H:%M:%S")
-        except Exception as e:
-            st.session_state["bg_last_error"] = str(e)
-        # Warten bis zum nächsten Intervall, aber früh abbrechen, wenn Stop kommt
-        waited = 0
-        while (waited < interval_seconds) and (not stop_event.is_set()):
-            stop_event.wait(1)  # 1s‑Wait, reagiert sofort auf Stop
-            waited += 1
-
-
-# -----------------------------------------------------------------------------
-# Streamlit UI
-# -----------------------------------------------------------------------------
-
-st.set_page_config(page_title="BT‑Scan‑Tool Dashboard", layout="wide")
-
-# Session‑State‑Defaults
+# Session State Initialisierung
 if "scan_running" not in st.session_state:
     st.session_state.scan_running = False
-if "scan_thread" not in st.session_state:
-    st.session_state.scan_thread = None
 if "stop_event" not in st.session_state:
-    st.session_state.stop_event = None
-if "bg_iterations" not in st.session_state:
-    st.session_state.bg_iterations = 0
-if "bg_last_heartbeat" not in st.session_state:
-    st.session_state.bg_last_heartbeat = None
-if "scan_interval" not in st.session_state:
-    st.session_state.scan_interval = load_config().get("scan_interval", 900)
+    st.session_state.stop_event = threading.Event()
 
-# LED‑Statusanzeige (grün/rot)
-scan_running = st.session_state.get("scan_running", False)
-status_color = "#16a34a" if scan_running else "#dc2626"
-status_text = "AKTIV" if scan_running else "INAKTIV"
+# --- Hintergrund Thread ---
+def scan_thread_func(stop_event, interval):
+    while not stop_event.is_set():
+        try:
+            devices = scan_and_store()
+            if telegram_report.config: # Wenn Config geladen
+                 # Nur senden wenn Geräte gefunden (optional Logik anpassbar)
+                if devices and len(devices) > 0:
+                     # Sende Zusammenfassung statt alle Devices um Spam zu vermeiden
+                    telegram_report.send_telegram_message(f"📡 Scan Update: {len(devices)} Geräte gefunden.")
+        except Exception as e:
+            print(f"Thread Error: {e}")
+        
+        # Wartezeit in kleinen Häppchen, um Stop schneller zu erkennen
+        for _ in range(interval):
+            if stop_event.is_set(): break
+            time.sleep(1)
 
-st.markdown(f"""
-<div style="display:flex;align-items:center;gap:.6rem;font-weight:600;font-size:1.1rem;">
-  <div style="width:16px;height:16px;border-radius:50%;background:{status_color};box-shadow:0 0 10px {status_color};"></div>
-  BT-SCAN&nbsp;{status_text}
-</div>
-""", unsafe_allow_html=True)
+# --- UI ---
+st.title("📡 BT-Scan Ultimate Dashboard")
 
-st.title("📡 Bluetooth‑Scan‑Tool Dashboard")
-
-# Auto‑Refresh, damit Heartbeat/Iterationen sichtbar updaten (alle 2s)
-try:
-    from streamlit_autorefresh import st_autorefresh  # optionales Paket
-except Exception:
-    st_autorefresh = None
-
-if st_autorefresh and st.session_state.get("scan_running", False):
-    st_autorefresh(interval=2000, key="auto_refresh_when_running")
-elif st.session_state.get("scan_running", False):
-    st.caption("Auto‑Refresh nicht aktiv (Paket 'streamlit-autorefresh' fehlt). UI aktualisiert sich bei Interaktion.")
-
-# Warnungen zu Modul‑Importen
-if scan_import_error_message:
-    st.warning(
-        f"Bluetooth‑Scan‑Modul konnte nicht importiert werden: {scan_import_error_message}. "
-        "Es werden Platzhalterdaten verwendet."
-    )
-if telegram_import_error_message:
-    st.warning(
-        f"Telegram‑Modul konnte nicht importiert werden: {telegram_import_error_message}. "
-        "Das Dashboard läuft, aber Telegram‑Versand ist deaktiviert."
-    )
-
-# Sidebar: Einstellungen
+# Sidebar
 with st.sidebar:
-    st.header("⚙️ Einstellungen")
-    cfg = load_config()
-    st.subheader("Telegram")
-    api_token = st.text_input("API Token", value=cfg.get("api_token", ""))
-    chat_id = st.text_input("Chat ID", value=cfg.get("chat_id", ""))
-    interval = st.slider("Intervall (Sekunden)", min_value=60, max_value=3600, value=st.session_state.scan_interval, step=30)
-    force_log_every_scan = st.checkbox("Jede Wiederholung loggen (TTL 900s ignorieren)", value=st.session_state.get("force_log_every_scan", False))
-
-    if st.button("Konfiguration speichern"):
-        cfg.update({"api_token": api_token, "chat_id": chat_id, "scan_interval": interval})
-        save_config(cfg)
-        st.session_state.scan_interval = interval
-        st.session_state.force_log_every_scan = force_log_every_scan
-        # Telegram‑Runtime‑Werte aktualisieren
-        if telegram_report:
-            telegram_report.API_TOKEN = api_token
-            telegram_report.CHAT_ID = chat_id
-            telegram_report.API_URL = f"https://api.telegram.org/bot{api_token}/sendMessage" if api_token else None
-        st.success("Konfiguration gespeichert.")
-
-    # Bluetooth‑Adapter Auswahl
-    receivers = list_bluetooth_receivers()
-    if receivers:
-        default_receiver = st.session_state.get("selected_receiver", receivers[0])
-        idx = receivers.index(default_receiver) if default_receiver in receivers else 0
-        selected = st.selectbox("Bluetooth‑Adapter", receivers, index=idx)
-        st.session_state.selected_receiver = selected
-    else:
-        st.caption("Keine Bluetooth‑Adapter gefunden oder `hcitool` nicht verfügbar.")
-
-# Programmkontrolle
-st.subheader("Programmkontrolle")
-col1, col2, col3 = st.columns(3)
-with col1:
+    st.header("⚙️ Steuerung")
+    scan_interval = st.number_input("Scan-Intervall (Sek)", min_value=10, value=300)
+    
     if not st.session_state.scan_running:
-        if st.button("▶️ Dauer‑Scan starten", key="start"):
+        if st.button("▶️ Auto-Scan Starten", type="primary"):
             st.session_state.scan_running = True
-            # frisches Stop‑Event anlegen
-            st.session_state.stop_event = threading.Event()
-            # initialen Heartbeat setzen (sichtbare Aktivität)
-            st.session_state.bg_last_heartbeat = time.strftime("%Y-%m-%d %H:%M:%S")
-            t = threading.Thread(
-                target=background_scan_loop,
-                kwargs={
-                    "interval_seconds": st.session_state.scan_interval,
-                    "stop_event": st.session_state.stop_event,
-                },
-                daemon=True,
-            )
+            st.session_state.stop_event.clear()
+            t = threading.Thread(target=scan_thread_func, args=(st.session_state.stop_event, scan_interval), daemon=True)
             t.start()
-            st.session_state.scan_thread = t
-    else:
-        st.write("▶️ Der Hintergrund‑Scan läuft.")
-
-with col2:
-    if st.session_state.scan_running:
-        if st.button("⏹️ Stop", key="stop"):
-            # Thread sauber stoppen
-            if st.session_state.stop_event:
-                st.session_state.stop_event.set()
-            
-            # Status sofort auf False setzen (vor dem Join!)
-            st.session_state.scan_running = False
-            
-            # Thread nicht blockierend joinen (läuft im Hintergrund aus)
-            t: threading.Thread | None = st.session_state.get("scan_thread")
-            if t and t.is_alive():
-                # Nicht blockierend warten
-                threading.Timer(0.1, lambda: t.join(timeout=5)).start()
-            
-            # Session State aufräumen
-            st.session_state.scan_thread = None
-            st.session_state.stop_event = None
-            
-            # WICHTIG: Kein finaler Scan und kein Telegram-Versand nach Stop!
-            
-            st.success("Dauer‑Scan wird gestoppt...")
-            # UI sofort neu laden, damit Buttons aktualisiert werden
             st.rerun()
     else:
-        st.write("⏹️ Kein Hintergrund‑Scan aktiv.")
+        if st.button("⏹️ Auto-Scan Stoppen", type="secondary"):
+            st.session_state.scan_running = False
+            st.session_state.stop_event.set()
+            st.rerun()
+            
+    st.markdown("---")
+    st.subheader("Telegram Config")
+    # Hier könnte man Inputs für API Token einfügen und speichern
 
-with col3:
-    # Laufzeit‑Info + Fehleranzeige
-    st.caption(
-        f"Heartbeat: {st.session_state.get('bg_last_heartbeat','–')} · Iterationen: {st.session_state.get('bg_iterations',0)}"
-    )
-    err = st.session_state.get("bg_last_error")
-    if err:
-        st.warning(f"Letzter Fehler: {err}")
+# Status Anzeige
+status_color = "green" if st.session_state.scan_running else "red"
+st.markdown(f"Status: **:{status_color}[{'LÄUFT' if st.session_state.scan_running else 'GESTOPPT'}]**")
 
-# Manueller Scan
-st.subheader("Manueller Scan")
-if st.button("🔍 Einmaligen Scan durchführen", key="manual_scan"):
-    force_log = st.session_state.get("force_log_every_scan", False)
-    manual_devices = perform_scan_backend(force_log=force_log)  # schreibt ins Log (ggf. erzwungen)
-    st.session_state.manual_results = manual_devices
-    st.success("Scan abgeschlossen.")
+# Manueller Scan Button
+if st.button("🔍 Sofort-Scan (Einmalig)"):
+    with st.spinner("Scanne Umgebung..."):
+        results = scan_and_store()
+        st.success(f"{len(results)} Geräte gefunden und gespeichert.")
 
-manual_results: List[str] = st.session_state.get("manual_results", [])
-if manual_results:
-    df_manual = devices_to_dataframe(manual_results)
-    st.write("### Ergebnisse des manuellen Scans")
-    st.dataframe(df_manual, width='stretch')
-    if st.button("📤 Ergebnisse via Telegram senden", key="manual_send"):
-        send_report_to_telegram_ui(manual_results)
+# --- Daten Visualisierung ---
+df = get_recent_logs(limit=1000)
 
-# Tabs: Log / Statistik / Karte
-
-tab_log, tab_stats, tab_map = st.tabs(["Log", "Statistik", "Karte"])
-
-with tab_log:
-    st.subheader("Logdatei ansehen")
-    logs = read_logs()
-    if logs:
-        to_display = logs[-200:]
-        st.text_area("Logauszug", value="\n".join(to_display), height=300)
-        if st.button("📤 Log via Telegram senden", key="send_log"):
-            send_log_to_telegram_ui(to_display)
-    else:
-        st.write("Es sind keine Logdaten vorhanden.")
-
-with tab_stats:
-    st.subheader("Statistische Auswertung")
-    logs = read_logs()
-    if logs:
-        data_records = []
-        for line in logs:
-            parts = line.split()
-            if len(parts) >= 6:
-                index = parts[0]
-                day = parts[1]
-                clock = parts[2]
-                month = parts[3]
-                mac = parts[4]
-                name = " ".join(parts[5:])
-                try:
-                    dt = datetime.strptime(f"{day} {month} {datetime.now().year} {clock}", "%d %b %Y %H%M")
-                except Exception:  # noqa: BLE001
-                    dt = datetime.now()
-                data_records.append((dt, mac, name))
-        if data_records:
-            df_stats = pd.DataFrame(data_records, columns=["Zeit", "MAC", "Name"])
-            top_devices = df_stats.groupby(["MAC", "Name"]).size().reset_index(name="Anzahl")
-            top_devices_sorted = top_devices.sort_values("Anzahl", ascending=False).head(10)
-            st.write("### Häufigste Geräte")
-            # Charts mit neuem API‑Argument
-            st.bar_chart(top_devices_sorted.set_index("MAC")["Anzahl"], width='stretch')
-
-            df_stats["Minute"] = df_stats["Zeit"].dt.floor("min")
-            counts_per_minute = df_stats.groupby("Minute").size()
-            st.write("### Anzahl erkannter Geräte pro Minute")
-            st.line_chart(counts_per_minute, width='stretch')
+if df is not None and not df.empty:
+    # Datenaufbereitung
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    
+    # Tabs
+    tab1, tab2, tab3 = st.tabs(["📊 Tabelle & Filter", "📈 RSSI & Stats", "🗺️ GPS Map"])
+    
+    with tab1:
+        st.subheader("Live Log (Letzte 1000 Einträge)")
+        search_term = st.text_input("Suche (MAC, Name, Vendor)")
+        
+        if search_term:
+            mask = df.astype(str).apply(lambda x: x.str.contains(search_term, case=False)).any(axis=1)
+            display_df = df[mask]
         else:
-            st.write("Nicht genügend Daten für Statistiken.")
-    else:
-        st.write("Keine Logdaten für Statistiken verfügbar.")
+            display_df = df
+            
+        st.dataframe(display_df, use_container_width=True)
 
-with tab_map:
-    st.subheader("Kartenansicht (GPS)")
-    logs = read_logs()
-    if logs:
-        markers = []
-        for line in logs:
-            parts = line.split()
-            # Beispiel: "001 14 1230 OCT MAC Name lat lon"
-            if len(parts) >= 8:
-                try:
-                    lat = float(parts[-2])
-                    lon = float(parts[-1])
-                    name = " ".join(parts[5:-2])
-                    markers.append((lat, lon, name))
-                except ValueError:
-                    continue
-        if markers:
-            avg_lat = sum(m[0] for m in markers) / len(markers)
-            avg_lon = sum(m[1] for m in markers) / len(markers)
-            fmap = Map(location=[avg_lat, avg_lon], zoom_start=13)
-            for lat, lon, name in markers:
-                Marker([lat, lon], popup=name).add_to(fmap)
-            # st_folium akzeptiert weiterhin numerische Breite in Pixeln
-            st_folium(fmap, width=900, height=500)
+    with tab2:
+        col1, col2 = st.columns(2)
+        with col1:
+            st.write("Top Hersteller")
+            st.bar_chart(df['vendor'].value_counts())
+        with col2:
+            st.write("Signalstärke Verlauf (Durchschnitt)")
+            # Resample auf Minuten für sauberen Graphen
+            rssi_chart = df[df['rssi'] < 0].set_index('timestamp')['rssi'].resample('5min').mean()
+            st.line_chart(rssi_chart)
+
+    with tab3:
+        st.subheader("Geräte Standorte")
+        # Filtern nach Einträgen die GPS Daten haben (nicht None)
+        gps_df = df.dropna(subset=['lat', 'lon'])
+        gps_df = gps_df[(gps_df['lat'] != 0) & (gps_df['lon'] != 0)] # Leere Nullen filtern
+        
+        if not gps_df.empty:
+            st.map(gps_df, latitude='lat', longitude='lon')
         else:
-            st.write("Die Logdatei enthält keine GPS‑Koordinaten.")
-    else:
-        st.write("Keine Logdatei vorhanden.")
+            st.info("Keine GPS Daten verfügbar. Stelle sicher, dass GPSD läuft.")
 
+else:
+    st.warning("Noch keine Daten in der Datenbank.")

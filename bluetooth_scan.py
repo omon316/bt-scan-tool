@@ -1,102 +1,128 @@
-from bleak import BleakScanner
 import asyncio
-
-# Existing imports and variables
-import time
-from datetime import datetime
-import bluetooth
+import bluetooth  # PyBluez für Classic
+from bleak import BleakScanner  # Für BLE & RSSI
+import requests
+import json
 import os
-#import gpsd ##GPS  Funktion
+from database import log_device_to_db, init_db
 
-##def get_gps_position():
-    # Connect to the local gpsd
-##    gpsd.connect()
+# --- GPS Setup ---
+try:
+    import gpsd
+    GPS_AVAILABLE = True
+except ImportError:
+    GPS_AVAILABLE = False
 
-    # Get GPS position
-##    packet = gpsd.get_current()
+# Cache für Vendor Lookup, um API-Limits zu sparen
+VENDOR_CACHE_FILE = "logs/vendor_cache.json"
+vendor_cache = {}
 
-##   if packet.mode >= 2:  # 2D fix, will return latitude and longitude
-##        lat = packet.lat
-##       lon = packet.lon
-##      return lat, lon
-## else:
-##     return None, None  # GPS data not available
+def load_vendor_cache():
+    global vendor_cache
+    if os.path.exists(VENDOR_CACHE_FILE):
+        with open(VENDOR_CACHE_FILE, 'r') as f:
+            vendor_cache = json.load(f)
 
+def save_vendor_cache():
+    with open(VENDOR_CACHE_FILE, 'w') as f:
+        json.dump(vendor_cache, f)
 
-# Dictionary to keep track of devices and their report times
-devices_seen = {}
-mac_to_index = {}  # Mapping MAC addresses to their unique index
-global_index_counter = 1
+def get_gps_position():
+    """Holt GPS Daten falls verfügbar, sonst None."""
+    if not GPS_AVAILABLE:
+        return None, None
+    try:
+        gpsd.connect()
+        packet = gpsd.get_current()
+        if packet.mode >= 2:
+            return packet.lat, packet.lon
+    except Exception:
+        pass
+    return None, None
 
-# Path to the log file
-log_file_path = "logs/bluetooth_scan.log"
-
-def ensure_log_directory():
-    # Create logs directory if it doesn't exist
-    if not os.path.exists("logs"):
-        os.makedirs("logs")
-
-def log_device(device_info):
-    # Write the device info to the log file
-    with open(log_file_path, "a") as log_file:
-        log_file.write(device_info + "\n")
-
-def scan_bluetooth_devices():
-    # Perform a Bluetooth inquiry using pybluez
-    nearby_devices = bluetooth.discover_devices(duration=8, lookup_names=True, flush_cache=True, lookup_class=False)
-    return nearby_devices
-
-def get_device_index(device_mac):
-    global global_index_counter
-    if device_mac not in mac_to_index:
-        mac_to_index[device_mac] = global_index_counter
-        global_index_counter += 1
-    return mac_to_index[device_mac]
-
-def store_device(device_mac, device_name):
-    global devices_seen
-    current_time = datetime.now()
-    if device_mac not in devices_seen or (current_time - devices_seen[device_mac]).total_seconds() > 900:
-        devices_seen[device_mac] = current_time
-        return True
-    return False
-
-def format_device_info(index, device_mac, device_name):
-    current_time = datetime.now()
-    date_str = current_time.strftime("%d")
-    time_str = current_time.strftime("%H%M")
-    month_str = current_time.strftime("%b").upper()
-    return f"{index:03d} {date_str} {time_str} {month_str} {device_mac} {device_name}"
+def get_vendor(mac):
+    """Ermittelt den Hersteller anhand der MAC-Adresse."""
+    prefix = mac[:8].upper()
+    
+    if prefix in vendor_cache:
+        return vendor_cache[prefix]
+    
+    try:
+        # Einfache API Abfrage (MacVendors)
+        url = f"https://api.macvendors.com/{mac}"
+        response = requests.get(url, timeout=2)
+        if response.status_code == 200:
+            vendor = response.text.strip()
+            vendor_cache[prefix] = vendor
+            save_vendor_cache()
+            return vendor
+    except Exception:
+        pass
+    
+    return "Unknown"
 
 async def scan_ble_devices():
-    devices = await BleakScanner.discover()
-    ble_devices = []
-    for device in devices:
-        ble_devices.append((device.address, device.name))
-    return ble_devices
+    """Scannt BLE Geräte inkl. RSSI."""
+    devices_found = []
+    try:
+        scanned = await BleakScanner.discover(timeout=5.0, return_adv=True)
+        for device, adv in scanned.values():
+            devices_found.append({
+                "mac": device.address,
+                "name": device.name or "Unknown BLE",
+                "rssi": adv.rssi,
+                "type": "BLE"
+            })
+    except Exception as e:
+        print(f"BLE Scan Error: {e}")
+    return devices_found
+
+def scan_classic_devices():
+    """Scannt Classic Bluetooth Geräte (ohne RSSI in Standard PyBluez)."""
+    devices_found = []
+    try:
+        # duration=4 ist schneller
+        results = bluetooth.discover_devices(duration=4, lookup_names=True, flush_cache=True)
+        for mac, name in results:
+            devices_found.append({
+                "mac": mac,
+                "name": name,
+                "rssi": -100,  # Platzhalter, da PyBluez kein RSSI liefert
+                "type": "Classic"
+            })
+    except Exception as e:
+        print(f"Classic Scan Error: {e}")
+    return devices_found
 
 def scan_and_store():
-    ensure_log_directory()  # Ensure log directory exists
+    """Hauptfunktion: Scannt, reichert Daten an (GPS, Vendor) und speichert in DB."""
+    init_db()
+    load_vendor_cache()
     
-    # Combine results from both classic and BLE scans
-    devices = scan_bluetooth_devices()
+    lat, lon = get_gps_position()
     
-    # Await the BLE scan results
-    ble_devices = asyncio.run(scan_ble_devices())
-    devices.extend(ble_devices)
+    # Parallelisierung simulieren (BLE ist async, Classic ist sync)
+    ble_results = asyncio.run(scan_ble_devices())
+    classic_results = scan_classic_devices()
     
-    results = []
-    for addr, name in devices:
-        if store_device(addr, name):
-            device_index = get_device_index(addr)  # Get the unique index for this MAC address
-            device_info = format_device_info(device_index, addr, name)
-            results.append(device_info)
-            log_device(device_info)  # Log the device info
-    return results
-
-# bluetooth_scan.py
-
-def manual_scan_and_send():
-    devices = scan_and_store()
-    from telegram_report import send_report
-    send_report(devices)
+    all_devices = ble_results + classic_results
+    newly_logged = []
+    
+    for dev in all_devices:
+        vendor = get_vendor(dev['mac'])
+        
+        # In DB speichern
+        log_device_to_db(
+            mac=dev['mac'],
+            name=dev['name'],
+            rssi=dev['rssi'],
+            vendor=vendor,
+            lat=lat,
+            lon=lon
+        )
+        
+        # Formatierung für Telegram/Output
+        info_str = f"{dev['mac']} | {dev['name']} | RSSI: {dev['rssi']} | {vendor}"
+        newly_logged.append(info_str)
+        
+    return newly_logged
